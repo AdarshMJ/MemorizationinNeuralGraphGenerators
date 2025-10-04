@@ -1,7 +1,3 @@
-# MemorizationinNeuralGraphGenerators
-We study memorization-generalization trends in VGAE+LDM applied to graphs.
-
-
 # Memorization-to-Generalization Experiment Guide
 
 ## Overview
@@ -76,8 +72,7 @@ For each graph in the test conditioning set:
    - WL similarity against the nearest training graph from `S1` (memorization).
    - Graph statistics distances using `gen_stats` (MSE & MAE across the first 15 features).
    - Within-model WL similarities for diversity estimates.
-   - Latent MMD using an RBF mixture. Bandwidth defaults to the median heuristic with $
-\gamma \in \{\gamma, \tfrac{1}{2}\gamma, 2\gamma\}$.
+   - Latent MMD using an RBF mixture. Bandwidth defaults to the median heuristic with $\gamma \in \{\gamma, \tfrac{1}{2}\gamma, 2\gamma\}$.
    - Per-conditioning variance of the generalization scores.
 3. **Latent analytics:**
    - Aggregate latents per model to compute an overall MMD.
@@ -97,7 +92,7 @@ For each graph in the test conditioning set:
 | --- | --- | --- |
 | **Generalization WL** | $\text{WL}(G^{\text{S1}}_i, G^{\text{S2}}_i)$ per paired sample | Detect convergence between independently trained models |
 | **Memorization WL** | $\max_{G \in S_1} \text{WL}(G^{\text{S1}}_i, G)$ | Measure similarity of samples to training memories |
-| **Statistics MSE / MAE** | Compare $\text{gen\_stats}(G^{\text{S1}}_i)$ vs $\text{gen\_stats}(G^{\text{S2}}_i)$ | Check consistency of structural properties |
+| **Statistics MSE / MAE** | Compare `gen_stats` applied to $G^{\text{S1}}_i$ vs $G^{\text{S2}}_i$ | Check consistency of structural properties |
 | **Within-model WL** | WL similarities among samples from one model | Estimate mode collapse or diversity |
 | **Latent MMD** | $$\text{MMD}^2 = \frac{1}{n^2} \sum_{i,j} k(x_i, x_j) + \frac{1}{m^2} \sum_{i,j} k(y_i, y_j) - \frac{2}{nm} \sum_{i,j} k(x_i, y_j)$$ with RBF kernels | Quantify how close latent distributions align |
 | **KS fail count** | Number of conditioning features where $p < 0.05$ (two-sample KS) | Confirm the splits remain statistically matched |
@@ -149,4 +144,3 @@ python main_comparison.py --data-path data/featurehomophily0.4_graphs.pkl --run-
 - **Ablations:** Vary diffusion timesteps, latent dimensionality, or conditioning vector size to study sensitivity.
 
 This guide should equip you to reproduce, audit, and modify the memorization-to-generalization experiments with confidence.
-
