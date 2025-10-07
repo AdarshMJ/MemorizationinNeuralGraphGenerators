@@ -91,7 +91,7 @@ For each graph in the test conditioning set:
 | Metric | Definition | Purpose |
 | --- | --- | --- |
 | **Generalization WL** | $\text{WL}(G^{\text{S1}}_i, G^{\text{S2}}_i)$ per paired sample | Detect convergence between independently trained models |
-| **Memorization WL** | $\max_{G \in S_1} \text{WL}(G^{\text{S1}}_i, G)$ | Measure similarity of samples to training memories |
+| **Memorization WL** | $\max_{G \in S_1} \text{WL}(G^{\text{S1}}_i, G)$ | Measure similarity of generated samples with training samples. |
 | **Statistics MSE / MAE** | Compare `gen_stats` applied to $G^{\text{S1}}_i$ vs $G^{\text{S2}}_i$ | Check consistency of structural properties |
 | **Within-model WL** | WL similarities among samples from one model | Estimate mode collapse or diversity |
 | **Latent MMD** | $$\text{MMD}^2 = \frac{1}{n^2} \sum_{i,j} k(x_i, x_j) + \frac{1}{m^2} \sum_{i,j} k(y_i, y_j) - \frac{2}{nm} \sum_{i,j} k(x_i, y_j)$$ with RBF kernels | Quantify how close latent distributions align |
