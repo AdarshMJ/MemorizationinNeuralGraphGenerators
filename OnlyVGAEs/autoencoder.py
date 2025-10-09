@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,30 +10,69 @@ from torch_geometric.nn import global_add_pool
 
 # Decoder
 class Decoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, n_layers, n_nodes):
+    def __init__(
+        self,
+        latent_dim,
+        hidden_dim,
+        n_layers,
+        n_nodes,
+        *,
+        node_hidden_dim: int = None,
+        dropout: float = 0.0,
+        use_gumbel: bool = False,
+        gumbel_tau: float = 1.0,
+    ):
         super(Decoder, self).__init__()
-        self.n_layers = n_layers
+        self.n_layers = max(n_layers, 1)
         self.n_nodes = n_nodes
+        self.use_gumbel = use_gumbel
+        self.gumbel_tau = gumbel_tau
+        self.node_hidden_dim = node_hidden_dim or hidden_dim
 
-        mlp_layers = [nn.Linear(latent_dim, hidden_dim)] + [nn.Linear(hidden_dim, hidden_dim) for i in range(n_layers-2)]
-        mlp_layers.append(nn.Linear(hidden_dim, 2*n_nodes*(n_nodes-1)//2))
+        mlp_layers = []
+        in_dim = latent_dim
+        for _ in range(self.n_layers - 1):
+            linear = nn.Linear(in_dim, hidden_dim)
+            nn.init.xavier_uniform_(linear.weight)
+            mlp_layers.append(linear)
+            in_dim = hidden_dim
+        self.hidden_layers = nn.ModuleList(mlp_layers)
+        self.activation = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
 
-        self.mlp = nn.ModuleList(mlp_layers)
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
+        self.node_projection = nn.Linear(in_dim, self.n_nodes * self.node_hidden_dim)
+        nn.init.xavier_uniform_(self.node_projection.weight)
+        self.node_norm = nn.LayerNorm(self.node_hidden_dim)
+        self.edge_bias = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes))
 
-    def forward(self, x):
-        for i in range(self.n_layers-1):
-            x = self.relu(self.mlp[i](x))
-        
-        x = self.mlp[self.n_layers-1](x)
-        x = torch.reshape(x, (x.size(0), -1, 2))
-        x = F.gumbel_softmax(x, tau=1, hard=True)[:,:,0]
+        mask = 1.0 - torch.eye(self.n_nodes)
+        self.register_buffer("off_diag_mask", mask)
 
-        adj = torch.zeros(x.size(0), self.n_nodes, self.n_nodes, device=x.device)
-        idx = torch.triu_indices(self.n_nodes, self.n_nodes, 1)
-        adj[:,idx[0],idx[1]] = x
-        adj = adj + torch.transpose(adj, 1, 2)
+    def forward(self, latent):
+        h = latent
+        for linear in self.hidden_layers:
+            h = self.activation(linear(h))
+            h = self.dropout(h)
+
+        node_repr = self.node_projection(h)
+        node_repr = node_repr.view(latent.size(0), self.n_nodes, self.node_hidden_dim)
+        node_repr = self.node_norm(node_repr)
+        node_repr = self.dropout(node_repr)
+
+        scores = torch.matmul(node_repr, node_repr.transpose(1, 2))
+        scores = scores / math.sqrt(self.node_hidden_dim)
+        bias = 0.5 * (self.edge_bias + self.edge_bias.t())
+        scores = scores + bias.unsqueeze(0)
+
+        if self.use_gumbel:
+            stacked = torch.stack([scores, torch.zeros_like(scores)], dim=-1)
+            sampled = F.gumbel_softmax(stacked, tau=self.gumbel_tau, hard=True)[..., 0]
+            adj = sampled
+        else:
+            adj = torch.sigmoid(scores)
+
+        adj = adj * self.off_diag_mask
+        adj = 0.5 * (adj + adj.transpose(1, 2))
         return adj
 
 
@@ -104,12 +145,35 @@ class PNA(torch.nn.Module):
 
 # Autoencoder
 class AutoEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim_enc, hidden_dim_dec, latent_dim, n_layers_enc, n_layers_dec, n_max_nodes):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim_enc,
+        hidden_dim_dec,
+        latent_dim,
+        n_layers_enc,
+        n_layers_dec,
+        n_max_nodes,
+        *,
+        decoder_node_hidden_dim: int = None,
+        decoder_dropout: float = 0.0,
+        decoder_use_gumbel: bool = False,
+        decoder_gumbel_tau: float = 1.0,
+    ):
         super(AutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
         self.encoder = GIN(input_dim, hidden_dim_enc, latent_dim, n_layers_enc)
-        self.decoder = Decoder(latent_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
+        self.decoder = Decoder(
+            latent_dim,
+            hidden_dim_dec,
+            n_layers_dec,
+            n_max_nodes,
+            node_hidden_dim=decoder_node_hidden_dim,
+            dropout=decoder_dropout,
+            use_gumbel=decoder_use_gumbel,
+            gumbel_tau=decoder_gumbel_tau,
+        )
 
     def forward(self, data):
         x_g = self.encoder(data)
@@ -133,7 +197,21 @@ class AutoEncoder(nn.Module):
 
 # Variational Autoencoder
 class VariationalAutoEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim_enc, hidden_dim_dec, latent_dim, n_layers_enc, n_layers_dec, n_max_nodes):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim_enc,
+        hidden_dim_dec,
+        latent_dim,
+        n_layers_enc,
+        n_layers_dec,
+        n_max_nodes,
+        *,
+        decoder_node_hidden_dim: int = None,
+        decoder_dropout: float = 0.0,
+        decoder_use_gumbel: bool = False,
+        decoder_gumbel_tau: float = 1.0,
+    ):
         super(VariationalAutoEncoder, self).__init__()
         self.n_max_nodes = n_max_nodes
         self.input_dim = input_dim
@@ -142,7 +220,16 @@ class VariationalAutoEncoder(nn.Module):
         #self.encoder = Powerful(input_dim=input_dim+1, num_layers=n_layers_enc, hidden=hidden_dim_enc, hidden_final=hidden_dim_enc, dropout_prob=0.0, simplified=False)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
-        self.decoder = Decoder(latent_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
+        self.decoder = Decoder(
+            latent_dim,
+            hidden_dim_dec,
+            n_layers_dec,
+            n_max_nodes,
+            node_hidden_dim=decoder_node_hidden_dim,
+            dropout=decoder_dropout,
+            use_gumbel=decoder_use_gumbel,
+            gumbel_tau=decoder_gumbel_tau,
+        )
 
     def forward(self, data):
         x_g = self.encoder(data)
