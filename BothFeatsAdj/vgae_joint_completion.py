@@ -1,6 +1,3 @@
-# Integrated version of the Joint VGAE (matrix-completion inspired) directly usable in your main_both.py
-# This replaces your previous VGAE implementation.
-
 import argparse
 import os
 import pickle
@@ -17,6 +14,16 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 from sklearn.metrics import confusion_matrix
+
+
+def normalize_features_inplace(graphs):
+    for data in graphs:
+        mean = data.x.mean(dim=0, keepdim=True)
+        std = data.x.std(dim=0, keepdim=True)
+        std = std.clamp_min(1e-6)
+        data.x = (data.x - mean) / std
+    return graphs
+
 
 # ------------------------- Encoder -------------------------
 class GCNEncoder(nn.Module):
@@ -40,6 +47,7 @@ class JointVGAE(nn.Module):
     def __init__(self, in_channels, hidden_channels, latent_dim, feat_dim, num_classes, dropout=0.0):
         super().__init__()
         self.encoder = GCNEncoder(in_channels, hidden_channels, latent_dim, dropout)
+        self.cond_proj = nn.Linear(in_channels, latent_dim)
 
         # Feature decoder (matrix completion style)
         self.feat_decoder_W = nn.Parameter(torch.randn(latent_dim, feat_dim) * 0.01)
@@ -60,8 +68,12 @@ class JointVGAE(nn.Module):
         else:
             return mu
 
-    def decode_adj(self, z, sigmoid=True):
-        adj_logits = z @ z.t()
+    def condition_latent(self, z, x):
+        return z + F.relu(self.cond_proj(x))
+
+    def decode_adj(self, z, x, sigmoid=True):
+        h = self.condition_latent(z, x)
+        adj_logits = h @ h.t()
         return torch.sigmoid(adj_logits) if sigmoid else adj_logits
 
     def decode_feats(self, z):
@@ -77,7 +89,7 @@ class JointVGAE(nn.Module):
             'mu': mu,
             'logvar': logvar,
             'z': z,
-            'A_pred': self.decode_adj(z),
+            'A_pred': self.decode_adj(z, x),
             'X_pred': self.decode_feats(z),
             'Y_logits': self.decode_labels(z)
         }
@@ -92,10 +104,11 @@ def compute_losses(model, batch, device, lambdas):
     batch = batch.to(device)
     out = model(batch.x, batch.edge_index)
     z = out['z']
+    h = model.condition_latent(z, batch.x)
 
     # Adjacency loss (pos + neg BCE)
     pos_edge_index = batch.edge_index
-    pos_logits = (z[pos_edge_index[0]] * z[pos_edge_index[1]]).sum(dim=1)
+    pos_logits = (h[pos_edge_index[0]] * h[pos_edge_index[1]]).sum(dim=1)
     pos_loss = F.binary_cross_entropy_with_logits(pos_logits, torch.ones_like(pos_logits))
 
     neg_edge_index = negative_sampling(
@@ -103,7 +116,7 @@ def compute_losses(model, batch, device, lambdas):
         num_nodes=batch.num_nodes,
         num_neg_samples=pos_edge_index.size(1)
     )
-    neg_logits = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=1)
+    neg_logits = (h[neg_edge_index[0]] * h[neg_edge_index[1]]).sum(dim=1)
     neg_loss = F.binary_cross_entropy_with_logits(neg_logits, torch.zeros_like(neg_logits))
 
     adj_loss = pos_loss + neg_loss
@@ -265,7 +278,8 @@ def sample_graphs(model, num_nodes, num_samples, device, threshold=0.5):
     with torch.no_grad():
         for _ in range(num_samples):
             z = torch.randn((num_nodes, model.encoder.conv_mu.out_channels), device=device)
-            adj_probs = model.decode_adj(z).clamp(min=0.0, max=1.0)
+            x_sample = model.decode_feats(z)
+            adj_probs = model.decode_adj(z, x_sample, sigmoid=True).clamp(min=0.0, max=1.0)
             if threshold is None:
                 adj_sample = torch.bernoulli(adj_probs)
             else:
@@ -273,7 +287,6 @@ def sample_graphs(model, num_nodes, num_samples, device, threshold=0.5):
             adj_sample = torch.triu(adj_sample, diagonal=1)
             adj_sample = adj_sample + adj_sample.t()
             edge_index, edge_weight = dense_to_sparse(adj_sample)
-            x_sample = model.decode_feats(z)
             y_logits = model.decode_labels(z)
             y_sample = y_logits.argmax(dim=1)
 
@@ -300,7 +313,7 @@ def parse_args():
     parser.add_argument('--hidden-dim', type=int, default=256, help='Hidden dimension in GCN encoder and label decoder.')
     parser.add_argument('--latent-dim', type=int, default=64, help='Latent dimension for the VAE.')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout probability in encoder.')
-    parser.add_argument('--lambda-x', type=float, default=10.0, help='Weight for feature reconstruction loss.')
+    parser.add_argument('--lambda-x', type=float, default=1000.0, help='Weight for feature reconstruction loss.')
     parser.add_argument('--lambda-y', type=float, default=1.0, help='Weight for label classification loss.')
     parser.add_argument('--beta', type=float, default=1.0, help='Weight for KL divergence term.')
     parser.add_argument('--num-samples', type=int, default=10, help='Number of graphs to sample after training.')
@@ -310,6 +323,7 @@ def parse_args():
     parser.add_argument('--device', type=str, default='auto', help="Computation device: 'cpu', 'cuda', or 'auto'.")
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--eval-interval', type=int, default=1, help='Epoch interval for validation logging.')
+    parser.add_argument('--normalize-features', action='store_true', help='Apply per-graph mean-std normalization to node features.')
     return parser.parse_args()
 
 
@@ -331,6 +345,9 @@ def main():
 
     if not dataset:
         raise ValueError('Loaded dataset is empty.')
+
+    if args.normalize_features:
+        dataset = normalize_features_inplace(dataset)
 
     feat_dim = dataset[0].x.size(1)
     num_classes = dataset[0].num_classes
